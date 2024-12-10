@@ -64,11 +64,7 @@ class TrainingApp:
             {"type": "softmax"},
         ]
 
-        # Create CNN and store layer output shapes
         self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
-        # We will gather shapes from the CNN initialization logs or from the code.
-        # The CNN initialization code already computes shapes for each layer.
-        # Let's replicate that logic here to have a list of output shapes:
         self.layer_shapes = self.get_layer_output_shapes()
 
         # Display network configuration
@@ -81,11 +77,25 @@ class TrainingApp:
         )
         config_display.pack(pady=5)
 
+        # Frame to hold architecture and details
+        top_frame = tk.Frame(self.master)
+        top_frame.pack(pady=5, fill="x")
+
         # Canvas for architecture visualization
-        # Increase size to ensure full network is visible
-        self.arch_canvas = tk.Canvas(self.master, width=1200, height=300, bg="white")
-        self.arch_canvas.pack(pady=5)
+        self.arch_canvas = tk.Canvas(top_frame, width=1200, height=300, bg="white")
+        self.arch_canvas.pack(side=tk.LEFT, padx=5)
+
+        # Will store the item IDs of layer boxes for highlighting and a mapping from box_id to layer_idx
+        self.layer_boxes = []
+        self.box_to_layer_idx = {}
         self.draw_network_architecture()
+
+        # Bind mouse click event on canvas
+        self.arch_canvas.bind("<Button-1>", self.on_canvas_click)
+
+        # Details panel on the right to show weights, biases, activations
+        self.details_text = scrolledtext.ScrolledText(top_frame, width=50, height=20)
+        self.details_text.pack(side=tk.LEFT, padx=5)
 
         # Frame for buttons
         button_frame = tk.Frame(self.master)
@@ -99,8 +109,8 @@ class TrainingApp:
         self.test_button = tk.Button(button_frame, text="Test", command=self.run_test)
         self.test_button.pack(side=tk.LEFT, padx=5)
 
-        # Text area for logs
-        self.log_area = scrolledtext.ScrolledText(self.master, width=60, height=15)
+        # Text area for logs at bottom
+        self.log_area = scrolledtext.ScrolledText(self.master, width=60, height=10)
         self.log_area.pack(pady=5)
 
         # Variables for training
@@ -110,10 +120,13 @@ class TrainingApp:
         self.epochs = 1
         self.log_lines = []
 
+        self.selected_layer_idx = None
+        # We'll store intermediate activations from forward passes
+        self.last_activations = [None] * (
+            len(self.cnn.layers)
+        )  # Store output of each layer in forward pass
+
     def get_layer_output_shapes(self):
-        """
-        Recompute the shapes of each layer's output, similar to what's done in CNN __init__.
-        """
         input_shape = (28, 28, 1)
         shapes = []
         current_shape = input_shape
@@ -130,7 +143,6 @@ class TrainingApp:
                 current_shape = (H_out, W_out, num_filters)
 
             elif layer_type == "relu":
-                # Same shape
                 pass
 
             elif layer_type == "pool":
@@ -150,40 +162,31 @@ class TrainingApp:
                 current_shape = (output_dim,)
 
             elif layer_type == "softmax":
-                # Shape stays same after softmax
                 pass
 
             shapes.append((layer_type, current_shape))
         return shapes
 
     def draw_network_architecture(self):
-        """
-        Draw the network architecture as boxes and arrows on the canvas.
-        Display layer type and output shape inside the box.
-        """
         x_start = 50
         y_start = 50
         box_width = 140
         box_height = 70
-        x_gap = 180  # increase gap to handle more text
+        x_gap = 180
 
         for i, (layer_type, shape) in enumerate(self.layer_shapes):
-            # Coordinates for the box
             x1 = x_start + i * x_gap
             y1 = y_start
             x2 = x1 + box_width
             y2 = y1 + box_height
 
-            # Draw rectangle
-            self.arch_canvas.create_rectangle(
+            box_id = self.arch_canvas.create_rectangle(
                 x1, y1, x2, y2, fill="lightblue", outline="black"
             )
+            self.layer_boxes.append(box_id)
+            self.box_to_layer_idx[box_id] = i
 
-            # Prepare text: layer type on top line, shape on next line(s)
             shape_str = str(shape)
-            # We'll show a two-line text:
-            # Line 1: Layer type
-            # Line 2: Output shape
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
                 y1 + 20,
@@ -199,15 +202,95 @@ class TrainingApp:
                 anchor="center",
             )
 
-            # Draw arrow from previous to current (except for the first layer)
             if i > 0:
-                prev_x2 = x_start + (i - 1) * x_gap + box_width
+                prev_x2 = 50 + (i - 1) * x_gap + box_width
                 prev_y_mid = (y_start + y_start + box_height) / 2
                 curr_x1 = x1
-                # Arrow line
                 self.arch_canvas.create_line(
                     prev_x2, prev_y_mid, curr_x1, prev_y_mid, arrow=tk.LAST
                 )
+
+    def on_canvas_click(self, event):
+        # Determine if a layer box was clicked
+        item = self.arch_canvas.find_closest(event.x, event.y)
+        item_id = item[0]
+        if item_id in self.box_to_layer_idx:
+            self.selected_layer_idx = self.box_to_layer_idx[item_id]
+            self.log(f"Selected layer {self.selected_layer_idx}")
+            self.update_details_panel()
+
+    def highlight_layer(self, idx, color):
+        self.arch_canvas.itemconfig(self.layer_boxes[idx], fill=color)
+        self.master.update_idletasks()
+
+    def reset_layer_color(self, idx):
+        self.arch_canvas.itemconfig(self.layer_boxes[idx], fill="lightblue")
+        self.master.update_idletasks()
+
+    def forward_step_by_step(self, x):
+        for i, layer in enumerate(self.cnn.layers):
+            self.highlight_layer(i, "yellow")
+            self.master.update()
+            time.sleep(0.01)
+
+            x = layer.forward(x)
+            self.last_activations[i] = x  # store activations
+
+            self.reset_layer_color(i)
+        return x
+
+    def backward_step_by_step(self, d_out):
+        for i in reversed(range(len(self.cnn.layers))):
+            layer = self.cnn.layers[i]
+            self.highlight_layer(i, "orange")
+            self.master.update()
+            time.sleep(0.01)
+            d_out = layer.backward(d_out)
+            self.reset_layer_color(i)
+        return d_out
+
+    def update_details_panel(self):
+        # Display details of the selected layer
+        self.details_text.delete("1.0", tk.END)
+        if self.selected_layer_idx is None:
+            self.details_text.insert(tk.END, "No layer selected.")
+            return
+
+        layer = self.cnn.layers[self.selected_layer_idx]
+        layer_type = self.layers_config[self.selected_layer_idx]["type"]
+        self.details_text.insert(
+            tk.END, f"Layer {self.selected_layer_idx}: {layer_type}\n\n"
+        )
+
+        # Show weights and biases if available
+        if hasattr(layer, "weights"):
+            w = layer.weights
+            self.details_text.insert(tk.END, f"Weights shape: {w.shape}\n")
+            self.details_text.insert(
+                tk.END, f"Weights mean: {w.mean():.4f}, std: {w.std():.4f}\n"
+            )
+        if hasattr(layer, "filters"):
+            f = layer.filters
+            self.details_text.insert(tk.END, f"Filters shape: {f.shape}\n")
+            self.details_text.insert(
+                tk.END, f"Filters mean: {f.mean():.4f}, std: {f.std():.4f}\n"
+            )
+        if hasattr(layer, "biases"):
+            b = layer.biases
+            self.details_text.insert(tk.END, f"Biases shape: {b.shape}\n")
+            self.details_text.insert(
+                tk.END, f"Biases mean: {b.mean():.4f}, std: {b.std():.4f}\n"
+            )
+
+        # Show intermediate activations if available (from last batch)
+        act = self.last_activations[self.selected_layer_idx]
+        if act is not None:
+            self.details_text.insert(tk.END, "\nActivations (last forward pass):\n")
+            self.details_text.insert(tk.END, f"Shape: {act.shape}\n")
+            # Just show mean and std
+            self.details_text.insert(
+                tk.END, f"Mean: {act.mean():.4f}, Std: {act.std():.4f}\n"
+            )
 
     def log(self, message):
         self.log_lines.append(message)
@@ -253,16 +336,19 @@ class TrainingApp:
                     i * self.batch_size : (i + 1) * self.batch_size
                 ]
 
-                probs = self.cnn.forward(batch_x)
+                probs = self.forward_step_by_step(batch_x)
                 loss = cross_entropy_loss(probs, batch_y)
                 acc = accuracy(probs, batch_y)
-
                 total_loss += loss
                 total_acc += acc
 
                 d_out = cross_entropy_grad(probs, batch_y)
-                self.cnn.backward(d_out)
+                self.backward_step_by_step(d_out)
                 self.cnn.update_params(self.learning_rate)
+
+                # Update details panel if a layer is selected
+                if self.selected_layer_idx is not None:
+                    self.update_details_panel()
 
                 if i % 10 == 0:
                     self.log(
