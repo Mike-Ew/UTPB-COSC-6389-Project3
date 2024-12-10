@@ -4,6 +4,7 @@ import threading
 import time
 import numpy as np
 import ast
+import math
 from data import MNISTDataLoader
 from network import CNN
 
@@ -84,7 +85,7 @@ class TrainingApp:
         canvas_frame = tk.Frame(top_frame)
         canvas_frame.pack(side=tk.LEFT, padx=5)
 
-        # Increase canvas size to be larger and more central
+        # Increase canvas size
         self.arch_canvas = tk.Canvas(canvas_frame, width=1200, height=400, bg="white")
         h_scroll = tk.Scrollbar(
             canvas_frame, orient="horizontal", command=self.arch_canvas.xview
@@ -106,21 +107,18 @@ class TrainingApp:
         controls_frame = tk.Frame(self.master)
         controls_frame.pack(pady=5)
 
-        # Batch size entry
         tk.Label(controls_frame, text="Batch Size:").pack(side=tk.LEFT, padx=5)
         self.batch_size_var = tk.StringVar(value="16")
         tk.Entry(controls_frame, textvariable=self.batch_size_var, width=5).pack(
             side=tk.LEFT
         )
 
-        # Learning rate entry
         tk.Label(controls_frame, text="Learning Rate:").pack(side=tk.LEFT, padx=5)
         self.learning_rate_var = tk.StringVar(value="0.01")
         tk.Entry(controls_frame, textvariable=self.learning_rate_var, width=5).pack(
             side=tk.LEFT
         )
 
-        # Buttons
         self.train_button = tk.Button(
             controls_frame, text="Train", command=self.start_training_thread
         )
@@ -139,17 +137,14 @@ class TrainingApp:
         self.test_button = tk.Button(controls_frame, text="Test", command=self.run_test)
         self.test_button.pack(side=tk.LEFT, padx=5)
 
-        # Configure network button
         self.configure_button = tk.Button(
             controls_frame, text="Configure Network", command=self.open_config_window
         )
         self.configure_button.pack(side=tk.LEFT, padx=5)
 
-        # Log area
         self.log_area = scrolledtext.ScrolledText(self.master, width=60, height=10)
         self.log_area.pack(pady=5)
 
-        # Variables for training
         self.training_running = False
         self.training_paused = False
         self.training_stopped = False
@@ -160,7 +155,6 @@ class TrainingApp:
         self.last_activations = [None] * (len(self.cnn.layers))
 
     def build_model(self):
-        # Build/rebuild the CNN with current layers_config
         self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
         self.layer_shapes = self.get_layer_output_shapes()
         self.param_summaries = self.get_param_summaries()
@@ -182,6 +176,7 @@ class TrainingApp:
                 current_shape = (H_out, W_out, num_filters)
 
             elif layer_type == "relu":
+                # shape does not change
                 pass
 
             elif layer_type == "pool":
@@ -201,6 +196,7 @@ class TrainingApp:
                 current_shape = (output_dim,)
 
             elif layer_type == "softmax":
+                # shape stays the same as the input of this layer
                 pass
 
             shapes.append((layer_type, current_shape))
@@ -222,6 +218,38 @@ class TrainingApp:
             summaries.append(summary.strip())
         return summaries
 
+    def get_box_size_for_shape(self, shape):
+        """
+        Compute box width and height based on shape.
+        Reference:
+         (28,28) → width=140, height=70
+         => width_per_unit = 140/28=5, height_per_unit=70/28=2.5
+        For 3D shapes (H,W,C):
+            width = 5 * W
+            height = 2.5 * H
+        For 1D shapes (D,):
+            pseudo_dim = sqrt(D)
+            width = 5 * pseudo_dim
+            height = 2.5 * pseudo_dim
+        Minimum width/height to avoid tiny boxes.
+        """
+        width_per_unit = 5.0
+        height_per_unit = 2.5
+
+        if len(shape) == 3:
+            H, W, C = shape
+            w = max(60, width_per_unit * W)
+            h = max(30, height_per_unit * H)
+        elif len(shape) == 1:
+            D = shape[0]
+            pseudo_dim = int(math.sqrt(D)) if D > 0 else 1
+            w = max(60, width_per_unit * pseudo_dim)
+            h = max(30, height_per_unit * pseudo_dim)
+        else:
+            w = 140
+            h = 70
+        return int(w), int(h)
+
     def draw_network_architecture(self):
         self.arch_canvas.delete("all")
         self.layer_boxes.clear()
@@ -229,17 +257,18 @@ class TrainingApp:
 
         x_start = 50
         y_start = 50
-        box_width = 140
-        box_height = 70
         x_gap = 180
 
+        current_x = x_start
         for i, ((layer_type, shape), p_summary) in enumerate(
             zip(self.layer_shapes, self.param_summaries)
         ):
-            x1 = x_start + i * x_gap
+            box_w, box_h = self.get_box_size_for_shape(shape)
+
+            x1 = current_x
+            x2 = x1 + box_w
             y1 = y_start
-            x2 = x1 + box_width
-            y2 = y1 + box_height
+            y2 = y1 + box_h
 
             box_id = self.arch_canvas.create_rectangle(
                 x1, y1, x2, y2, fill="lightblue", outline="black"
@@ -248,16 +277,17 @@ class TrainingApp:
             self.box_to_layer_idx[box_id] = i
 
             shape_str = str(shape)
+            # Text inside box: layer type and shape at proportional positions
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
-                y1 + 20,
+                y1 + (box_h * 0.3),
                 text=layer_type,
                 font=("Helvetica", 10),
                 anchor="center",
             )
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
-                y1 + 40,
+                y1 + (box_h * 0.6),
                 text=shape_str,
                 font=("Helvetica", 9),
                 anchor="center",
@@ -273,15 +303,21 @@ class TrainingApp:
                     anchor="center",
                 )
 
+            # Arrow from previous to current
             if i > 0:
-                prev_x2 = 50 + (i - 1) * x_gap + box_width
-                prev_y_mid = (y_start + y_start + box_height) / 2
-                curr_x1 = x1
+                prev_box_id = self.layer_boxes[i - 1]
+                prev_coords = self.arch_canvas.coords(prev_box_id)
+                prev_x_center = (prev_coords[0] + prev_coords[2]) / 2
+                prev_y_center = (prev_coords[1] + prev_coords[3]) / 2
+                curr_y_center = (y1 + y2) / 2
                 self.arch_canvas.create_line(
-                    prev_x2, prev_y_mid, curr_x1, prev_y_mid, arrow=tk.LAST
+                    prev_coords[2], prev_y_center, x1, curr_y_center, arrow=tk.LAST
                 )
 
-        total_width = 50 + (len(self.layer_shapes) - 1) * x_gap + box_width + 50
+            # Update current_x for next layer
+            current_x = x2 + x_gap
+
+        total_width = current_x + 50
         self.arch_canvas.config(scrollregion=(0, 0, total_width, 400))
 
     def on_canvas_click(self, event):
@@ -481,7 +517,7 @@ class TrainingApp:
         test_acc = accuracy(probs, self.y_test)
         self.log(f"Test Accuracy: {test_acc:.4f}")
 
-        # Print expected vs predicted results for first 10 samples
+        # Print expected vs predicted (first 10 samples) in terminal
         pred_classes = np.argmax(probs, axis=1)
         print("Expected vs Predicted (first 10 samples):")
         for i in range(min(10, len(self.y_test))):
@@ -502,11 +538,9 @@ class TrainingApp:
         def apply_config():
             new_config_str = config_text.get("1.0", tk.END).strip()
             try:
-                # Safely parse python literal
                 new_config = ast.literal_eval(new_config_str)
                 if not isinstance(new_config, list):
                     raise ValueError("Configuration must be a list of dicts.")
-                # Validate that each element is a dict with at least a 'type' key
                 for layer in new_config:
                     if not isinstance(layer, dict) or "type" not in layer:
                         raise ValueError(
