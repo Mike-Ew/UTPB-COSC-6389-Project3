@@ -7,7 +7,6 @@ from data import MNISTDataLoader
 from network import CNN
 
 
-# Simple cross-entropy and accuracy functions
 def cross_entropy_loss(probs, labels):
     N = probs.shape[0]
     one_hot = np.zeros_like(probs)
@@ -65,9 +64,13 @@ class TrainingApp:
             {"type": "softmax"},
         ]
 
+        # Create CNN and store layer output shapes
         self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
+        # We will gather shapes from the CNN initialization logs or from the code.
+        # The CNN initialization code already computes shapes for each layer.
+        # Let's replicate that logic here to have a list of output shapes:
+        self.layer_shapes = self.get_layer_output_shapes()
 
-        # GUI elements
         # Display network configuration
         config_label = tk.Label(self.master, text="Network Configuration:")
         config_label.pack(pady=5)
@@ -78,7 +81,13 @@ class TrainingApp:
         )
         config_display.pack(pady=5)
 
-        # Training and testing buttons
+        # Canvas for architecture visualization
+        # Increase size to ensure full network is visible
+        self.arch_canvas = tk.Canvas(self.master, width=1200, height=300, bg="white")
+        self.arch_canvas.pack(pady=5)
+        self.draw_network_architecture()
+
+        # Frame for buttons
         button_frame = tk.Frame(self.master)
         button_frame.pack(pady=5)
 
@@ -99,12 +108,109 @@ class TrainingApp:
         self.batch_size = 16
         self.learning_rate = 0.01
         self.epochs = 1
-        self.log_lines = []  # Keep track of log lines
+        self.log_lines = []
+
+    def get_layer_output_shapes(self):
+        """
+        Recompute the shapes of each layer's output, similar to what's done in CNN __init__.
+        """
+        input_shape = (28, 28, 1)
+        shapes = []
+        current_shape = input_shape
+        for config in self.layers_config:
+            layer_type = config["type"]
+            if layer_type == "conv":
+                padding = config.get("padding", 1)
+                stride = config.get("stride", 1)
+                filter_size = config.get("filter_size", 3)
+                num_filters = config.get("num_filters", 8)
+                H, W, C = current_shape
+                H_out = (H + 2 * padding - filter_size) // stride + 1
+                W_out = (W + 2 * padding - filter_size) // stride + 1
+                current_shape = (H_out, W_out, num_filters)
+
+            elif layer_type == "relu":
+                # Same shape
+                pass
+
+            elif layer_type == "pool":
+                pool_size = config.get("pool_size", 2)
+                stride = config.get("stride", 2)
+                H, W, C = current_shape
+                H_out = (H - pool_size) // stride + 1
+                W_out = (W - pool_size) // stride + 1
+                current_shape = (H_out, W_out, C)
+
+            elif layer_type == "flatten":
+                H, W, C = current_shape
+                current_shape = (H * W * C,)
+
+            elif layer_type == "dense":
+                output_dim = config.get("units")
+                current_shape = (output_dim,)
+
+            elif layer_type == "softmax":
+                # Shape stays same after softmax
+                pass
+
+            shapes.append((layer_type, current_shape))
+        return shapes
+
+    def draw_network_architecture(self):
+        """
+        Draw the network architecture as boxes and arrows on the canvas.
+        Display layer type and output shape inside the box.
+        """
+        x_start = 50
+        y_start = 50
+        box_width = 140
+        box_height = 70
+        x_gap = 180  # increase gap to handle more text
+
+        for i, (layer_type, shape) in enumerate(self.layer_shapes):
+            # Coordinates for the box
+            x1 = x_start + i * x_gap
+            y1 = y_start
+            x2 = x1 + box_width
+            y2 = y1 + box_height
+
+            # Draw rectangle
+            self.arch_canvas.create_rectangle(
+                x1, y1, x2, y2, fill="lightblue", outline="black"
+            )
+
+            # Prepare text: layer type on top line, shape on next line(s)
+            shape_str = str(shape)
+            # We'll show a two-line text:
+            # Line 1: Layer type
+            # Line 2: Output shape
+            self.arch_canvas.create_text(
+                (x1 + x2) / 2,
+                y1 + 20,
+                text=layer_type,
+                font=("Helvetica", 10),
+                anchor="center",
+            )
+            self.arch_canvas.create_text(
+                (x1 + x2) / 2,
+                y1 + 45,
+                text=shape_str,
+                font=("Helvetica", 9),
+                anchor="center",
+            )
+
+            # Draw arrow from previous to current (except for the first layer)
+            if i > 0:
+                prev_x2 = x_start + (i - 1) * x_gap + box_width
+                prev_y_mid = (y_start + y_start + box_height) / 2
+                curr_x1 = x1
+                # Arrow line
+                self.arch_canvas.create_line(
+                    prev_x2, prev_y_mid, curr_x1, prev_y_mid, arrow=tk.LAST
+                )
 
     def log(self, message):
-        # Add message to log_lines and update GUI text
         self.log_lines.append(message)
-        # Limit lines to prevent very large logs
         if len(self.log_lines) > 300:
             self.log_lines = self.log_lines[-300:]
         self.log_area.delete("1.0", tk.END)
@@ -121,7 +227,6 @@ class TrainingApp:
             self.log("Training is already running.")
 
     def train_network(self):
-        # Shuffle data and run training loop
         X_train = self.X_train
         y_train = self.y_train
         num_samples = X_train.shape[0]
@@ -139,7 +244,6 @@ class TrainingApp:
 
             for i in range(num_batches):
                 if not self.training_running:
-                    # If training was stopped, break early
                     self.log("Training stopped prematurely.")
                     return
                 batch_x = X_train_shuffled[
@@ -149,7 +253,6 @@ class TrainingApp:
                     i * self.batch_size : (i + 1) * self.batch_size
                 ]
 
-                # Forward
                 probs = self.cnn.forward(batch_x)
                 loss = cross_entropy_loss(probs, batch_y)
                 acc = accuracy(probs, batch_y)
@@ -157,18 +260,15 @@ class TrainingApp:
                 total_loss += loss
                 total_acc += acc
 
-                # Backward
                 d_out = cross_entropy_grad(probs, batch_y)
                 self.cnn.backward(d_out)
                 self.cnn.update_params(self.learning_rate)
 
-                # Update GUI every 10 batches
                 if i % 10 == 0:
                     self.log(
                         f"Epoch {epoch+1}, Batch {i}/{num_batches}, Loss: {loss:.4f}, Acc: {acc:.4f}"
                     )
 
-                # Give a tiny break to allow UI updates
                 time.sleep(0.001)
 
             avg_loss = total_loss / num_batches
