@@ -64,8 +64,10 @@ class TrainingApp:
             {"type": "softmax"},
         ]
 
+        # Build CNN
         self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
         self.layer_shapes = self.get_layer_output_shapes()
+        self.param_summaries = self.get_param_summaries()
 
         # Display network configuration
         config_label = tk.Label(self.master, text="Network Configuration:")
@@ -81,50 +83,77 @@ class TrainingApp:
         top_frame = tk.Frame(self.master)
         top_frame.pack(pady=5, fill="x")
 
-        # Canvas for architecture visualization
-        self.arch_canvas = tk.Canvas(top_frame, width=1200, height=300, bg="white")
-        self.arch_canvas.pack(side=tk.LEFT, padx=5)
+        # Canvas frame with scrollbar
+        canvas_frame = tk.Frame(top_frame)
+        canvas_frame.pack(side=tk.LEFT, padx=5)
 
-        # Will store the item IDs of layer boxes for highlighting and a mapping from box_id to layer_idx
+        self.arch_canvas = tk.Canvas(canvas_frame, width=800, height=300, bg="white")
+        h_scroll = tk.Scrollbar(
+            canvas_frame, orient="horizontal", command=self.arch_canvas.xview
+        )
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.arch_canvas.configure(xscrollcommand=h_scroll.set)
+        self.arch_canvas.pack(side=tk.LEFT, fill="both", expand=True)
+
         self.layer_boxes = []
         self.box_to_layer_idx = {}
         self.draw_network_architecture()
 
-        # Bind mouse click event on canvas
         self.arch_canvas.bind("<Button-1>", self.on_canvas_click)
 
-        # Details panel on the right to show weights, biases, activations
         self.details_text = scrolledtext.ScrolledText(top_frame, width=50, height=20)
         self.details_text.pack(side=tk.LEFT, padx=5)
 
-        # Frame for buttons
-        button_frame = tk.Frame(self.master)
-        button_frame.pack(pady=5)
+        # Frame for controls
+        controls_frame = tk.Frame(self.master)
+        controls_frame.pack(pady=5)
 
+        # Batch size entry
+        tk.Label(controls_frame, text="Batch Size:").pack(side=tk.LEFT, padx=5)
+        self.batch_size_var = tk.StringVar(value="16")
+        tk.Entry(controls_frame, textvariable=self.batch_size_var, width=5).pack(
+            side=tk.LEFT
+        )
+
+        # Learning rate entry
+        tk.Label(controls_frame, text="Learning Rate:").pack(side=tk.LEFT, padx=5)
+        self.learning_rate_var = tk.StringVar(value="0.01")
+        tk.Entry(controls_frame, textvariable=self.learning_rate_var, width=5).pack(
+            side=tk.LEFT
+        )
+
+        # Training control buttons
         self.train_button = tk.Button(
-            button_frame, text="Train", command=self.start_training_thread
+            controls_frame, text="Train", command=self.start_training_thread
         )
         self.train_button.pack(side=tk.LEFT, padx=5)
 
-        self.test_button = tk.Button(button_frame, text="Test", command=self.run_test)
+        self.pause_button = tk.Button(
+            controls_frame, text="Pause", command=self.pause_training
+        )
+        self.pause_button.pack(side=tk.LEFT, padx=5)
+
+        self.stop_button = tk.Button(
+            controls_frame, text="Stop", command=self.stop_training
+        )
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        self.test_button = tk.Button(controls_frame, text="Test", command=self.run_test)
         self.test_button.pack(side=tk.LEFT, padx=5)
 
-        # Text area for logs at bottom
+        # Log area
         self.log_area = scrolledtext.ScrolledText(self.master, width=60, height=10)
         self.log_area.pack(pady=5)
 
         # Variables for training
         self.training_running = False
-        self.batch_size = 16
-        self.learning_rate = 0.01
+        self.training_paused = False
+        self.training_stopped = False
         self.epochs = 1
         self.log_lines = []
 
         self.selected_layer_idx = None
-        # We'll store intermediate activations from forward passes
-        self.last_activations = [None] * (
-            len(self.cnn.layers)
-        )  # Store output of each layer in forward pass
+        self.last_activations = [None] * (len(self.cnn.layers))
 
     def get_layer_output_shapes(self):
         input_shape = (28, 28, 1)
@@ -167,6 +196,22 @@ class TrainingApp:
             shapes.append((layer_type, current_shape))
         return shapes
 
+    def get_param_summaries(self):
+        summaries = []
+        for layer in self.cnn.layers:
+            summary = ""
+            if hasattr(layer, "weights"):
+                w = layer.weights
+                summary += f"Wmean={w.mean():.2f},Wstd={w.std():.2f} "
+            if hasattr(layer, "filters"):
+                f = layer.filters
+                summary += f"Fmean={f.mean():.2f},Fstd={f.std():.2f} "
+            if hasattr(layer, "biases"):
+                b = layer.biases
+                summary += f"Bmean={b.mean():.2f},Bstd={b.std():.2f}"
+            summaries.append(summary.strip())
+        return summaries
+
     def draw_network_architecture(self):
         x_start = 50
         y_start = 50
@@ -174,7 +219,9 @@ class TrainingApp:
         box_height = 70
         x_gap = 180
 
-        for i, (layer_type, shape) in enumerate(self.layer_shapes):
+        for i, ((layer_type, shape), p_summary) in enumerate(
+            zip(self.layer_shapes, self.param_summaries)
+        ):
             x1 = x_start + i * x_gap
             y1 = y_start
             x2 = x1 + box_width
@@ -187,6 +234,7 @@ class TrainingApp:
             self.box_to_layer_idx[box_id] = i
 
             shape_str = str(shape)
+            # Layer type and shape inside box
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
                 y1 + 20,
@@ -196,11 +244,21 @@ class TrainingApp:
             )
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
-                y1 + 45,
+                y1 + 40,
                 text=shape_str,
                 font=("Helvetica", 9),
                 anchor="center",
             )
+
+            # Parameters below the box
+            if p_summary:
+                self.arch_canvas.create_text(
+                    (x1 + x2) / 2,
+                    y2 + 20,
+                    text=p_summary,
+                    font=("Helvetica", 8),
+                    anchor="center",
+                )
 
             if i > 0:
                 prev_x2 = 50 + (i - 1) * x_gap + box_width
@@ -210,8 +268,10 @@ class TrainingApp:
                     prev_x2, prev_y_mid, curr_x1, prev_y_mid, arrow=tk.LAST
                 )
 
+        total_width = 50 + (len(self.layer_shapes) - 1) * x_gap + box_width + 50
+        self.arch_canvas.config(scrollregion=(0, 0, total_width, 300))
+
     def on_canvas_click(self, event):
-        # Determine if a layer box was clicked
         item = self.arch_canvas.find_closest(event.x, event.y)
         item_id = item[0]
         if item_id in self.box_to_layer_idx:
@@ -234,7 +294,7 @@ class TrainingApp:
             time.sleep(0.01)
 
             x = layer.forward(x)
-            self.last_activations[i] = x  # store activations
+            self.last_activations[i] = x
 
             self.reset_layer_color(i)
         return x
@@ -250,7 +310,6 @@ class TrainingApp:
         return d_out
 
     def update_details_panel(self):
-        # Display details of the selected layer
         self.details_text.delete("1.0", tk.END)
         if self.selected_layer_idx is None:
             self.details_text.insert(tk.END, "No layer selected.")
@@ -262,32 +321,29 @@ class TrainingApp:
             tk.END, f"Layer {self.selected_layer_idx}: {layer_type}\n\n"
         )
 
-        # Show weights and biases if available
         if hasattr(layer, "weights"):
             w = layer.weights
             self.details_text.insert(tk.END, f"Weights shape: {w.shape}\n")
             self.details_text.insert(
-                tk.END, f"Weights mean: {w.mean():.4f}, std: {w.std():.4f}\n"
+                tk.END, f"W mean: {w.mean():.4f}, W std: {w.std():.4f}\n"
             )
         if hasattr(layer, "filters"):
             f = layer.filters
             self.details_text.insert(tk.END, f"Filters shape: {f.shape}\n")
             self.details_text.insert(
-                tk.END, f"Filters mean: {f.mean():.4f}, std: {f.std():.4f}\n"
+                tk.END, f"F mean: {f.mean():.4f}, F std: {f.std():.4f}\n"
             )
         if hasattr(layer, "biases"):
             b = layer.biases
             self.details_text.insert(tk.END, f"Biases shape: {b.shape}\n")
             self.details_text.insert(
-                tk.END, f"Biases mean: {b.mean():.4f}, std: {b.std():.4f}\n"
+                tk.END, f"B mean: {b.mean():.4f}, B std: {b.std():.4f}\n"
             )
 
-        # Show intermediate activations if available (from last batch)
         act = self.last_activations[self.selected_layer_idx]
         if act is not None:
             self.details_text.insert(tk.END, "\nActivations (last forward pass):\n")
             self.details_text.insert(tk.END, f"Shape: {act.shape}\n")
-            # Just show mean and std
             self.details_text.insert(
                 tk.END, f"Mean: {act.mean():.4f}, Std: {act.std():.4f}\n"
             )
@@ -302,12 +358,39 @@ class TrainingApp:
 
     def start_training_thread(self):
         if not self.training_running:
+            # Parse batch size
+            try:
+                self.batch_size = int(self.batch_size_var.get())
+            except ValueError:
+                self.log("Invalid batch size, using default 16.")
+                self.batch_size = 16
+
+            # Parse learning rate
+            try:
+                self.learning_rate = float(self.learning_rate_var.get())
+            except ValueError:
+                self.log("Invalid learning rate, using default 0.01.")
+                self.learning_rate = 0.01
+
             self.training_running = True
+            self.training_paused = False
+            self.training_stopped = False
             self.log("Starting training...")
             thread = threading.Thread(target=self.train_network)
             thread.start()
         else:
             self.log("Training is already running.")
+
+    def pause_training(self):
+        if self.training_running and not self.training_stopped:
+            self.training_paused = not self.training_paused
+            state = "paused" if self.training_paused else "resumed"
+            self.log(f"Training {state}.")
+
+    def stop_training(self):
+        if self.training_running:
+            self.training_stopped = True
+            self.log("Stop requested. Training will stop after current batch.")
 
     def train_network(self):
         X_train = self.X_train
@@ -326,9 +409,19 @@ class TrainingApp:
             num_batches = num_samples // self.batch_size
 
             for i in range(num_batches):
-                if not self.training_running:
+                if self.training_stopped:
                     self.log("Training stopped prematurely.")
+                    self.training_running = False
                     return
+
+                while self.training_paused and not self.training_stopped:
+                    time.sleep(0.1)
+
+                if self.training_stopped:
+                    self.log("Training stopped prematurely.")
+                    self.training_running = False
+                    return
+
                 batch_x = X_train_shuffled[
                     i * self.batch_size : (i + 1) * self.batch_size
                 ]
@@ -346,7 +439,6 @@ class TrainingApp:
                 self.backward_step_by_step(d_out)
                 self.cnn.update_params(self.learning_rate)
 
-                # Update details panel if a layer is selected
                 if self.selected_layer_idx is not None:
                     self.update_details_panel()
 
@@ -367,7 +459,7 @@ class TrainingApp:
         self.training_running = False
 
     def run_test(self):
-        if self.training_running:
+        if self.training_running and not self.training_stopped:
             self.log("Cannot test while training is in progress.")
             return
 
