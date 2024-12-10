@@ -1,8 +1,9 @@
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, messagebox
 import threading
 import time
 import numpy as np
+import ast
 from data import MNISTDataLoader
 from network import CNN
 
@@ -33,13 +34,7 @@ class TrainingApp:
         self.master = master
         self.master.title("CNN Training GUI")
 
-        # Load data
-        self.data_loader = MNISTDataLoader(dataset_path="./data")
-        (self.X_train, self.y_train), (self.X_test, self.y_test) = (
-            self.data_loader.load_data()
-        )
-
-        # Define network configuration
+        # Default network configuration
         self.layers_config = [
             {
                 "type": "conv",
@@ -64,20 +59,22 @@ class TrainingApp:
             {"type": "softmax"},
         ]
 
-        # Build CNN
-        self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
-        self.layer_shapes = self.get_layer_output_shapes()
-        self.param_summaries = self.get_param_summaries()
+        self.build_model()  # Build CNN from self.layers_config
+
+        # Load data
+        self.data_loader = MNISTDataLoader(dataset_path="./data")
+        (self.X_train, self.y_train), (self.X_test, self.y_test) = (
+            self.data_loader.load_data()
+        )
 
         # Display network configuration
         config_label = tk.Label(self.master, text="Network Configuration:")
         config_label.pack(pady=5)
 
-        config_text = "\n".join([str(layer) for layer in self.layers_config])
-        config_display = tk.Label(
-            self.master, text=config_text, justify="left", anchor="w"
+        self.config_display = tk.Label(
+            self.master, text=str(self.layers_config), justify="left", anchor="w"
         )
-        config_display.pack(pady=5)
+        self.config_display.pack(pady=5)
 
         # Frame to hold architecture and details
         top_frame = tk.Frame(self.master)
@@ -87,7 +84,8 @@ class TrainingApp:
         canvas_frame = tk.Frame(top_frame)
         canvas_frame.pack(side=tk.LEFT, padx=5)
 
-        self.arch_canvas = tk.Canvas(canvas_frame, width=800, height=300, bg="white")
+        # Increase canvas size to be larger and more central
+        self.arch_canvas = tk.Canvas(canvas_frame, width=1200, height=400, bg="white")
         h_scroll = tk.Scrollbar(
             canvas_frame, orient="horizontal", command=self.arch_canvas.xview
         )
@@ -122,7 +120,7 @@ class TrainingApp:
             side=tk.LEFT
         )
 
-        # Training control buttons
+        # Buttons
         self.train_button = tk.Button(
             controls_frame, text="Train", command=self.start_training_thread
         )
@@ -141,6 +139,12 @@ class TrainingApp:
         self.test_button = tk.Button(controls_frame, text="Test", command=self.run_test)
         self.test_button.pack(side=tk.LEFT, padx=5)
 
+        # Configure network button
+        self.configure_button = tk.Button(
+            controls_frame, text="Configure Network", command=self.open_config_window
+        )
+        self.configure_button.pack(side=tk.LEFT, padx=5)
+
         # Log area
         self.log_area = scrolledtext.ScrolledText(self.master, width=60, height=10)
         self.log_area.pack(pady=5)
@@ -154,6 +158,12 @@ class TrainingApp:
 
         self.selected_layer_idx = None
         self.last_activations = [None] * (len(self.cnn.layers))
+
+    def build_model(self):
+        # Build/rebuild the CNN with current layers_config
+        self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
+        self.layer_shapes = self.get_layer_output_shapes()
+        self.param_summaries = self.get_param_summaries()
 
     def get_layer_output_shapes(self):
         input_shape = (28, 28, 1)
@@ -213,6 +223,10 @@ class TrainingApp:
         return summaries
 
     def draw_network_architecture(self):
+        self.arch_canvas.delete("all")
+        self.layer_boxes.clear()
+        self.box_to_layer_idx.clear()
+
         x_start = 50
         y_start = 50
         box_width = 140
@@ -234,7 +248,6 @@ class TrainingApp:
             self.box_to_layer_idx[box_id] = i
 
             shape_str = str(shape)
-            # Layer type and shape inside box
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
                 y1 + 20,
@@ -269,7 +282,7 @@ class TrainingApp:
                 )
 
         total_width = 50 + (len(self.layer_shapes) - 1) * x_gap + box_width + 50
-        self.arch_canvas.config(scrollregion=(0, 0, total_width, 300))
+        self.arch_canvas.config(scrollregion=(0, 0, total_width, 400))
 
     def on_canvas_click(self, event):
         item = self.arch_canvas.find_closest(event.x, event.y)
@@ -467,6 +480,49 @@ class TrainingApp:
         probs = self.cnn.forward(self.X_test)
         test_acc = accuracy(probs, self.y_test)
         self.log(f"Test Accuracy: {test_acc:.4f}")
+
+        # Print expected vs predicted results for first 10 samples
+        pred_classes = np.argmax(probs, axis=1)
+        print("Expected vs Predicted (first 10 samples):")
+        for i in range(min(10, len(self.y_test))):
+            print(f"Index {i}: Expected={self.y_test[i]}, Predicted={pred_classes[i]}")
+
+    def open_config_window(self):
+        # A top-level window to edit layers_config
+        config_window = tk.Toplevel(self.master)
+        config_window.title("Configure Network")
+
+        tk.Label(config_window, text="Edit the layers_config (Python literal):").pack(
+            pady=5
+        )
+        config_text = scrolledtext.ScrolledText(config_window, width=60, height=15)
+        config_text.pack(pady=5)
+        config_text.insert(tk.END, str(self.layers_config))
+
+        def apply_config():
+            new_config_str = config_text.get("1.0", tk.END).strip()
+            try:
+                # Safely parse python literal
+                new_config = ast.literal_eval(new_config_str)
+                if not isinstance(new_config, list):
+                    raise ValueError("Configuration must be a list of dicts.")
+                # Validate that each element is a dict with at least a 'type' key
+                for layer in new_config:
+                    if not isinstance(layer, dict) or "type" not in layer:
+                        raise ValueError(
+                            "Each layer config must be a dict with a 'type' key."
+                        )
+                self.layers_config = new_config
+                self.build_model()
+                self.draw_network_architecture()
+                self.config_display.config(text=str(self.layers_config))
+                self.log("Network configuration updated.")
+                config_window.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to parse config: {e}")
+
+        apply_button = tk.Button(config_window, text="Apply", command=apply_config)
+        apply_button.pack(pady=5)
 
 
 if __name__ == "__main__":
