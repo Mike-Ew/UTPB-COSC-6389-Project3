@@ -5,6 +5,64 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 
+def im2col(x, filter_size, stride, padding):
+    """
+    Transform the input image batch into column form.
+    x: (N, H, W, C)
+    Returns: col: (N*out_h*out_w, filter_size*filter_size*C)
+    """
+    N, H, W, C = x.shape
+    fH = fW = filter_size
+    out_h = (H + 2 * padding - fH) // stride + 1
+    out_w = (W + 2 * padding - fW) // stride + 1
+
+    x_padded = np.pad(
+        x, ((0, 0), (padding, padding), (padding, padding), (0, 0)), mode="constant"
+    )
+    col = np.zeros((N, out_h, out_w, fH, fW, C))
+
+    for i in range(out_h):
+        for j in range(out_w):
+            h_start = i * stride
+            h_end = h_start + fH
+            w_start = j * stride
+            w_end = w_start + fW
+            col[:, i, j, :, :, :] = x_padded[:, h_start:h_end, w_start:w_end, :]
+
+    col = col.reshape(N * out_h * out_w, fH * fW * C)
+    return col
+
+
+def col2im(col, x_shape, filter_size, stride, padding):
+    """
+    Transform columns back to images.
+    col: (N*out_h*out_w, fH*fW*C)
+    x_shape: original (N, H, W, C)
+    Returns: x: (N, H, W, C)
+    """
+    N, H, W, C = x_shape
+    fH = fW = filter_size
+    out_h = (H + 2 * padding - fH) // stride + 1
+    out_w = (W + 2 * padding - fW) // stride + 1
+
+    col = col.reshape(N, out_h, out_w, fH, fW, C)
+    x_padded = np.zeros((N, H + 2 * padding, W + 2 * padding, C))
+
+    for i in range(out_h):
+        for j in range(out_w):
+            h_start = i * stride
+            h_end = h_start + fH
+            w_start = j * stride
+            w_end = w_start + fW
+            x_padded[:, h_start:h_end, w_start:w_end, :] += col[:, i, j, :, :, :]
+
+    if padding > 0:
+        x = x_padded[:, padding:-padding, padding:-padding, :]
+    else:
+        x = x_padded
+    return x
+
+
 class ConvLayer:
     def __init__(self, num_filters, filter_size, stride=1, padding=0, input_shape=None):
         self.num_filters = num_filters
@@ -12,9 +70,12 @@ class ConvLayer:
         self.stride = stride
         self.padding = padding
         self.input_shape = input_shape
+
         if input_shape is not None:
             self._initialize_weights()
+
         self.x = None
+        self.col = None
         self.dW = None
         self.db = None
 
@@ -35,95 +96,34 @@ class ConvLayer:
     def forward(self, x):
         self.x = x
         N, H, W, C = x.shape
-        H_out = (H + 2 * self.padding - self.filter_size) // self.stride + 1
-        W_out = (W + 2 * self.padding - self.filter_size) // self.stride + 1
+        fH = fW = self.filter_size
+        out_h = (H + 2 * self.padding - fH) // self.stride + 1
+        out_w = (W + 2 * self.padding - fW) // self.stride + 1
 
-        x_padded = x
-        if self.padding > 0:
-            x_padded = np.pad(
-                x,
-                (
-                    (0, 0),
-                    (self.padding, self.padding),
-                    (self.padding, self.padding),
-                    (0, 0),
-                ),
-                "constant",
-            )
-
-        out = np.zeros((N, H_out, W_out, self.num_filters))
-        filters_reshaped = self.filters.reshape(self.num_filters, -1)
-
-        for i in range(H_out):
-            for j in range(W_out):
-                h_start = i * self.stride
-                h_end = h_start + self.filter_size
-                w_start = j * self.stride
-                w_end = w_start + self.filter_size
-                patch = x_padded[:, h_start:h_end, w_start:w_end, :]
-                patch_reshaped = patch.reshape(N, -1)
-                out[:, i, j, :] = patch_reshaped.dot(filters_reshaped.T) + self.biases
+        self.W_col = self.filters.reshape(self.num_filters, -1)
+        self.col = im2col(x, self.filter_size, self.stride, self.padding)
+        out = self.col.dot(self.W_col.T) + self.biases
+        out = out.reshape(N, out_h, out_w, self.num_filters)
         return out
 
     def backward(self, d_out):
-        N, H_in, W_in, C_in = self.x.shape
-        H_out, W_out = d_out.shape[1], d_out.shape[2]
+        N, out_h, out_w, F = d_out.shape
+        fH = fW = self.filter_size
+        C = self.input_shape[2]
 
-        if self.padding > 0:
-            x_padded = np.pad(
-                self.x,
-                (
-                    (0, 0),
-                    (self.padding, self.padding),
-                    (self.padding, self.padding),
-                    (0, 0),
-                ),
-                "constant",
-            )
-        else:
-            x_padded = self.x
+        d_out_reshaped = d_out.reshape(-1, F)
 
-        dX_padded = np.zeros_like(x_padded)
-        self.dW = np.zeros_like(self.filters)
-        self.db = np.zeros_like(self.biases)
+        # Bias gradient
+        self.db = np.sum(d_out_reshaped, axis=0)
 
-        filters_reshaped = self.filters.reshape(self.num_filters, -1)
+        # Weight gradient
+        self.dW = d_out_reshaped.T.dot(self.col)
+        self.dW = self.dW.reshape(F, fH, fW, C)
 
-        for i in range(H_out):
-            for j in range(W_out):
-                h_start = i * self.stride
-                h_end = h_start + self.filter_size
-                w_start = j * self.stride
-                w_end = w_start + self.filter_size
+        # Gradient w.r.t. input
+        d_col = d_out_reshaped.dot(self.W_col)
+        dX = col2im(d_col, self.x.shape, self.filter_size, self.stride, self.padding)
 
-                patch = x_padded[:, h_start:h_end, w_start:w_end, :]
-                patch_reshaped = patch.reshape(N, -1)
-
-                # db
-                self.db += np.sum(d_out[:, i, j, :], axis=0)
-
-                # dW
-                for f in range(self.num_filters):
-                    d_out_f = d_out[:, i, j, f][:, np.newaxis]
-                    self.dW[f] += (
-                        (patch_reshaped * d_out_f)
-                        .sum(axis=0)
-                        .reshape(self.filter_size, self.filter_size, C_in)
-                    )
-
-                # dX
-                for n in range(N):
-                    grad_in = d_out[n, i, j, :].dot(filters_reshaped)
-                    dX_padded[n, h_start:h_end, w_start:w_end, :] += grad_in.reshape(
-                        self.filter_size, self.filter_size, C_in
-                    )
-
-        if self.padding > 0:
-            dX = dX_padded[
-                :, self.padding : -self.padding, self.padding : -self.padding, :
-            ]
-        else:
-            dX = dX_padded
         return dX
 
     def update_params(self, lr=0.01):
@@ -165,7 +165,6 @@ class MaxPoolLayer:
                 h_end = h_start + self.pool_size
                 w_start = j * self.stride
                 w_end = w_start + self.pool_size
-
                 patch = x[:, h_start:h_end, w_start:w_end, :]
                 out[:, i, j, :] = np.max(patch, axis=(1, 2))
         return out
@@ -224,7 +223,6 @@ class DenseLayer:
         return x.dot(self.weights) + self.biases
 
     def backward(self, d_out):
-        N = self.x.shape[0]
         self.dW = self.x.T.dot(d_out)
         self.db = np.sum(d_out, axis=0)
         dX = d_out.dot(self.weights.T)
@@ -245,8 +243,7 @@ class SoftmaxLayer:
         return self.out
 
     def backward(self, d_out):
-        # Here d_out is expected to be dL/dY from cross-entropy
-        return d_out
+        return d_out  # Softmax + Cross-Entropy handled in loss
 
     def update_params(self, lr=0.01):
         pass
@@ -305,8 +302,6 @@ class CNN:
             logging.info(f"Added layer {layer_type} with shape {current_shape}.")
 
     def forward(self, x):
-        # Reduced logging: only log at start and final shape
-        # Start forward pass
         for layer in self.layers:
             x = layer.forward(x)
         return x
