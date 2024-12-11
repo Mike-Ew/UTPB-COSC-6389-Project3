@@ -2,9 +2,11 @@ import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading
 import time
-import numpy as np
-import ast
 import math
+import ast
+import numpy as np
+import queue
+
 from data import MNISTDataLoader
 from network import CNN
 
@@ -77,15 +79,13 @@ class TrainingApp:
         )
         self.config_display.pack(pady=5)
 
-        # Frame to hold architecture and details
         top_frame = tk.Frame(self.master)
         top_frame.pack(pady=5, fill="x")
 
-        # Canvas frame with scrollbar
         canvas_frame = tk.Frame(top_frame)
         canvas_frame.pack(side=tk.LEFT, padx=5)
 
-        # Increase canvas size
+        # Large canvas size
         self.arch_canvas = tk.Canvas(canvas_frame, width=1200, height=400, bg="white")
         h_scroll = tk.Scrollbar(
             canvas_frame, orient="horizontal", command=self.arch_canvas.xview
@@ -96,14 +96,18 @@ class TrainingApp:
 
         self.layer_boxes = []
         self.box_to_layer_idx = {}
+
+        # Store text item IDs for each layer line
+        self.p_summary_text_ids = {}
+        self.detail_text_ids = {}
+        self.activation_text_ids = {}
+
         self.draw_network_architecture()
 
-        self.arch_canvas.bind("<Button-1>", self.on_canvas_click)
+        # Removed side panel and details, no on_canvas_click needed
+        # No selection logic either
 
-        self.details_text = scrolledtext.ScrolledText(top_frame, width=50, height=20)
-        self.details_text.pack(side=tk.LEFT, padx=5)
-
-        # Frame for controls
+        # Controls frame
         controls_frame = tk.Frame(self.master)
         controls_frame.pack(pady=5)
 
@@ -145,14 +149,21 @@ class TrainingApp:
         self.log_area = scrolledtext.ScrolledText(self.master, width=60, height=10)
         self.log_area.pack(pady=5)
 
+        # Training control variables
         self.training_running = False
         self.training_paused = False
         self.training_stopped = False
         self.epochs = 1
         self.log_lines = []
 
-        self.selected_layer_idx = None
+        # Store last activations for each layer
         self.last_activations = [None] * (len(self.cnn.layers))
+
+        # Queue for thread communication (training -> UI)
+        self.update_queue = queue.Queue()
+
+        # Poll the queue periodically
+        self.master.after(100, self.update_ui_from_queue)
 
     def build_model(self):
         self.cnn = CNN(self.layers_config, input_shape=(28, 28, 1))
@@ -174,11 +185,8 @@ class TrainingApp:
                 H_out = (H + 2 * padding - filter_size) // stride + 1
                 W_out = (W + 2 * padding - filter_size) // stride + 1
                 current_shape = (H_out, W_out, num_filters)
-
             elif layer_type == "relu":
-                # shape does not change
                 pass
-
             elif layer_type == "pool":
                 pool_size = config.get("pool_size", 2)
                 stride = config.get("stride", 2)
@@ -186,19 +194,14 @@ class TrainingApp:
                 H_out = (H - pool_size) // stride + 1
                 W_out = (W - pool_size) // stride + 1
                 current_shape = (H_out, W_out, C)
-
             elif layer_type == "flatten":
                 H, W, C = current_shape
                 current_shape = (H * W * C,)
-
             elif layer_type == "dense":
                 output_dim = config.get("units")
                 current_shape = (output_dim,)
-
             elif layer_type == "softmax":
-                # shape stays the same as the input of this layer
                 pass
-
             shapes.append((layer_type, current_shape))
         return shapes
 
@@ -219,20 +222,6 @@ class TrainingApp:
         return summaries
 
     def get_box_size_for_shape(self, shape):
-        """
-        Compute box width and height based on shape.
-        Reference:
-         (28,28) → width=140, height=70
-         => width_per_unit = 140/28=5, height_per_unit=70/28=2.5
-        For 3D shapes (H,W,C):
-            width = 5 * W
-            height = 2.5 * H
-        For 1D shapes (D,):
-            pseudo_dim = sqrt(D)
-            width = 5 * pseudo_dim
-            height = 2.5 * pseudo_dim
-        Minimum width/height to avoid tiny boxes.
-        """
         width_per_unit = 5.0
         height_per_unit = 2.5
 
@@ -254,6 +243,9 @@ class TrainingApp:
         self.arch_canvas.delete("all")
         self.layer_boxes.clear()
         self.box_to_layer_idx.clear()
+        self.p_summary_text_ids.clear()
+        self.detail_text_ids.clear()
+        self.activation_text_ids.clear()
 
         x_start = 50
         y_start = 50
@@ -264,7 +256,6 @@ class TrainingApp:
             zip(self.layer_shapes, self.param_summaries)
         ):
             box_w, box_h = self.get_box_size_for_shape(shape)
-
             x1 = current_x
             x2 = x1 + box_w
             y1 = y_start
@@ -277,7 +268,6 @@ class TrainingApp:
             self.box_to_layer_idx[box_id] = i
 
             shape_str = str(shape)
-            # Text inside box: layer type and shape at proportional positions
             self.arch_canvas.create_text(
                 (x1 + x2) / 2,
                 y1 + (box_h * 0.3),
@@ -293,17 +283,34 @@ class TrainingApp:
                 anchor="center",
             )
 
-            # Parameters below the box
+            # Parameter summary text below the box
+            line_y = y2 + 20
             if p_summary:
-                self.arch_canvas.create_text(
+                tid_p = self.arch_canvas.create_text(
                     (x1 + x2) / 2,
-                    y2 + 20,
+                    line_y,
                     text=p_summary,
                     font=("Helvetica", 8),
                     anchor="center",
                 )
+                self.p_summary_text_ids[i] = tid_p
+            else:
+                self.p_summary_text_ids[i] = None
 
-            # Arrow from previous to current
+            # Add another line for detailed parameters (W/F/B shapes + means)
+            line_y += 20
+            tid_detail = self.arch_canvas.create_text(
+                (x1 + x2) / 2, line_y, text="", font=("Helvetica", 8), anchor="center"
+            )
+            self.detail_text_ids[i] = tid_detail
+
+            # Another line for activations
+            line_y += 20
+            tid_act = self.arch_canvas.create_text(
+                (x1 + x2) / 2, line_y, text="", font=("Helvetica", 8), anchor="center"
+            )
+            self.activation_text_ids[i] = tid_act
+
             if i > 0:
                 prev_box_id = self.layer_boxes[i - 1]
                 prev_coords = self.arch_canvas.coords(prev_box_id)
@@ -314,88 +321,10 @@ class TrainingApp:
                     prev_coords[2], prev_y_center, x1, curr_y_center, arrow=tk.LAST
                 )
 
-            # Update current_x for next layer
             current_x = x2 + x_gap
 
         total_width = current_x + 50
         self.arch_canvas.config(scrollregion=(0, 0, total_width, 400))
-
-    def on_canvas_click(self, event):
-        item = self.arch_canvas.find_closest(event.x, event.y)
-        item_id = item[0]
-        if item_id in self.box_to_layer_idx:
-            self.selected_layer_idx = self.box_to_layer_idx[item_id]
-            self.log(f"Selected layer {self.selected_layer_idx}")
-            self.update_details_panel()
-
-    def highlight_layer(self, idx, color):
-        self.arch_canvas.itemconfig(self.layer_boxes[idx], fill=color)
-        self.master.update_idletasks()
-
-    def reset_layer_color(self, idx):
-        self.arch_canvas.itemconfig(self.layer_boxes[idx], fill="lightblue")
-        self.master.update_idletasks()
-
-    def forward_step_by_step(self, x):
-        for i, layer in enumerate(self.cnn.layers):
-            self.highlight_layer(i, "yellow")
-            self.master.update()
-            time.sleep(0.01)
-
-            x = layer.forward(x)
-            self.last_activations[i] = x
-
-            self.reset_layer_color(i)
-        return x
-
-    def backward_step_by_step(self, d_out):
-        for i in reversed(range(len(self.cnn.layers))):
-            layer = self.cnn.layers[i]
-            self.highlight_layer(i, "orange")
-            self.master.update()
-            time.sleep(0.01)
-            d_out = layer.backward(d_out)
-            self.reset_layer_color(i)
-        return d_out
-
-    def update_details_panel(self):
-        self.details_text.delete("1.0", tk.END)
-        if self.selected_layer_idx is None:
-            self.details_text.insert(tk.END, "No layer selected.")
-            return
-
-        layer = self.cnn.layers[self.selected_layer_idx]
-        layer_type = self.layers_config[self.selected_layer_idx]["type"]
-        self.details_text.insert(
-            tk.END, f"Layer {self.selected_layer_idx}: {layer_type}\n\n"
-        )
-
-        if hasattr(layer, "weights"):
-            w = layer.weights
-            self.details_text.insert(tk.END, f"Weights shape: {w.shape}\n")
-            self.details_text.insert(
-                tk.END, f"W mean: {w.mean():.4f}, W std: {w.std():.4f}\n"
-            )
-        if hasattr(layer, "filters"):
-            f = layer.filters
-            self.details_text.insert(tk.END, f"Filters shape: {f.shape}\n")
-            self.details_text.insert(
-                tk.END, f"F mean: {f.mean():.4f}, F std: {f.std():.4f}\n"
-            )
-        if hasattr(layer, "biases"):
-            b = layer.biases
-            self.details_text.insert(tk.END, f"Biases shape: {b.shape}\n")
-            self.details_text.insert(
-                tk.END, f"B mean: {b.mean():.4f}, B std: {b.std():.4f}\n"
-            )
-
-        act = self.last_activations[self.selected_layer_idx]
-        if act is not None:
-            self.details_text.insert(tk.END, "\nActivations (last forward pass):\n")
-            self.details_text.insert(tk.END, f"Shape: {act.shape}\n")
-            self.details_text.insert(
-                tk.END, f"Mean: {act.mean():.4f}, Std: {act.std():.4f}\n"
-            )
 
     def log(self, message):
         self.log_lines.append(message)
@@ -407,14 +336,12 @@ class TrainingApp:
 
     def start_training_thread(self):
         if not self.training_running:
-            # Parse batch size
             try:
                 self.batch_size = int(self.batch_size_var.get())
             except ValueError:
                 self.log("Invalid batch size, using default 16.")
                 self.batch_size = 16
 
-            # Parse learning rate
             try:
                 self.learning_rate = float(self.learning_rate_var.get())
             except ValueError:
@@ -478,18 +405,39 @@ class TrainingApp:
                     i * self.batch_size : (i + 1) * self.batch_size
                 ]
 
-                probs = self.forward_step_by_step(batch_x)
+                # Forward
+                x = batch_x
+                for idx, layer in enumerate(self.cnn.layers):
+                    x = layer.forward(x)
+                    self.last_activations[idx] = x
+
+                # Compute loss/acc
+                probs = x
                 loss = cross_entropy_loss(probs, batch_y)
                 acc = accuracy(probs, batch_y)
                 total_loss += loss
                 total_acc += acc
 
+                # Backward
                 d_out = cross_entropy_grad(probs, batch_y)
-                self.backward_step_by_step(d_out)
+                for idx in reversed(range(len(self.cnn.layers))):
+                    d_out = self.cnn.layers[idx].backward(d_out)
+
                 self.cnn.update_params(self.learning_rate)
 
-                if self.selected_layer_idx is not None:
-                    self.update_details_panel()
+                # After update, compute new param_summaries
+                new_summaries = self.get_param_summaries()
+
+                # Also gather detailed stats for each layer
+                detail_info = self.gather_detailed_info()
+
+                # Gather activation info
+                activation_info = self.gather_activation_info()
+
+                # Send to queue
+                self.update_queue.put(
+                    ("all_updates", (new_summaries, detail_info, activation_info))
+                )
 
                 if i % 10 == 0:
                     self.log(
@@ -517,14 +465,12 @@ class TrainingApp:
         test_acc = accuracy(probs, self.y_test)
         self.log(f"Test Accuracy: {test_acc:.4f}")
 
-        # Print expected vs predicted (first 10 samples) in terminal
         pred_classes = np.argmax(probs, axis=1)
         print("Expected vs Predicted (first 10 samples):")
         for i in range(min(10, len(self.y_test))):
             print(f"Index {i}: Expected={self.y_test[i]}, Predicted={pred_classes[i]}")
 
     def open_config_window(self):
-        # A top-level window to edit layers_config
         config_window = tk.Toplevel(self.master)
         config_window.title("Configure Network")
 
@@ -557,6 +503,71 @@ class TrainingApp:
 
         apply_button = tk.Button(config_window, text="Apply", command=apply_config)
         apply_button.pack(pady=5)
+
+    def update_ui_from_queue(self):
+        try:
+            while True:
+                msg_type, data = self.update_queue.get_nowait()
+                if msg_type == "all_updates":
+                    new_summaries, detail_info, activation_info = data
+                    self.param_summaries = new_summaries
+                    self.update_all_info_ui(detail_info, activation_info)
+        except queue.Empty:
+            pass
+
+        self.master.after(100, self.update_ui_from_queue)
+
+    def gather_detailed_info(self):
+        """
+        Gather shape/mean/std info for weights, filters, biases
+        """
+        info = []
+        for layer in self.cnn.layers:
+            lines = []
+            if hasattr(layer, "weights"):
+                w = layer.weights
+                lines.append(f"W:{w.shape}, Wm={w.mean():.2f},Ws={w.std():.2f}")
+            if hasattr(layer, "filters"):
+                f = layer.filters
+                lines.append(f"F:{f.shape}, Fm={f.mean():.2f},Fs={f.std():.2f}")
+            if hasattr(layer, "biases"):
+                b = layer.biases
+                lines.append(f"B:{b.shape}, Bm={b.mean():.2f},Bs={b.std():.2f}")
+            info.append(" | ".join(lines))
+        return info
+
+    def gather_activation_info(self):
+        """
+        Gather shape/mean/std info for activations
+        """
+        act_info = []
+        for act in self.last_activations:
+            if act is not None:
+                act_info.append(
+                    f"A:{act.shape}, Am={act.mean():.2f},As={act.std():.2f}"
+                )
+            else:
+                act_info.append("")
+        return act_info
+
+    def update_all_info_ui(self, detail_info, activation_info):
+        # Update param_summaries line
+        for i, summary in enumerate(self.param_summaries):
+            tid_p = self.p_summary_text_ids.get(i, None)
+            if tid_p is not None:
+                self.arch_canvas.itemconfig(tid_p, text=summary)
+
+        # Update detail line
+        for i, det in enumerate(detail_info):
+            tid_d = self.detail_text_ids.get(i, None)
+            if tid_d is not None:
+                self.arch_canvas.itemconfig(tid_d, text=det)
+
+        # Update activation line
+        for i, act in enumerate(activation_info):
+            tid_a = self.activation_text_ids.get(i, None)
+            if tid_a is not None:
+                self.arch_canvas.itemconfig(tid_a, text=act)
 
 
 if __name__ == "__main__":
