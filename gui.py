@@ -42,17 +42,18 @@ class GUIApp:
         self.viz.canvas.config(yscrollcommand=v_scrollbar.set)
         v_scrollbar.config(command=self.viz.canvas.yview)
 
-        self.root.after(100, self.update_ui_from_queue)
+        # Increased interval from 100 to 200 ms for less frequent polling
+        self.root.after(200, self.update_ui_from_queue)
 
     def update_ui_from_queue(self):
+        # Attempt to process just one message per cycle to keep the UI responsive
         try:
-            while True:
-                msg_type, data = self.update_queue.get_nowait()
-                if msg_type == "all_updates":
-                    layers_data = data
-                    self.viz.update_network(layers_data)
-                    # Update scrollregion so scrollbar knows the size
-                    self.viz.canvas.config(scrollregion=self.viz.canvas.bbox("all"))
+            msg_type, data = self.update_queue.get_nowait()
+            if msg_type == "all_updates":
+                layers_data = data
+                self.viz.update_network(layers_data)
+                # Update scrollregion so scrollbar knows the size
+                self.viz.canvas.config(scrollregion=self.viz.canvas.bbox("all"))
         except Empty:
             # No more messages in the queue right now
             pass
@@ -60,7 +61,8 @@ class GUIApp:
             # Log unexpected exceptions
             print(f"Unexpected error in update_ui_from_queue: {e}")
 
-        self.root.after(100, self.update_ui_from_queue)
+        # Schedule the next update
+        self.root.after(200, self.update_ui_from_queue)
 
     def draw_initial_network(self, layers_data):
         self.viz.update_network(layers_data)
