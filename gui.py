@@ -1,5 +1,6 @@
 # gui.py
 import tkinter as tk
+from queue import Empty
 from visualization import Visualization
 
 
@@ -52,8 +53,12 @@ class GUIApp:
                     self.viz.update_network(layers_data)
                     # Update scrollregion so scrollbar knows the size
                     self.viz.canvas.config(scrollregion=self.viz.canvas.bbox("all"))
-        except:
+        except Empty:
+            # No more messages in the queue right now
             pass
+        except Exception as e:
+            # Log unexpected exceptions
+            print(f"Unexpected error in update_ui_from_queue: {e}")
 
         self.root.after(100, self.update_ui_from_queue)
 
