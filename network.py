@@ -6,11 +6,6 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 
 def im2col(x, filter_size, stride, padding):
-    """
-    Transform the input image batch into column form.
-    x: (N, H, W, C)
-    Returns: col: (N*out_h*out_w, filter_size*filter_size*C)
-    """
     N, H, W, C = x.shape
     fH = fW = filter_size
     out_h = (H + 2 * padding - fH) // stride + 1
@@ -34,12 +29,6 @@ def im2col(x, filter_size, stride, padding):
 
 
 def col2im(col, x_shape, filter_size, stride, padding):
-    """
-    Transform columns back to images.
-    col: (N*out_h*out_w, fH*fW*C)
-    x_shape: original (N, H, W, C)
-    Returns: x: (N, H, W, C)
-    """
     N, H, W, C = x_shape
     fH = fW = filter_size
     out_h = (H + 2 * padding - fH) // stride + 1
@@ -78,6 +67,7 @@ class ConvLayer:
         self.col = None
         self.dW = None
         self.db = None
+        self.out = None  # Store output
 
     def _initialize_weights(self):
         C = self.input_shape[2]
@@ -104,6 +94,7 @@ class ConvLayer:
         self.col = im2col(x, self.filter_size, self.stride, self.padding)
         out = self.col.dot(self.W_col.T) + self.biases
         out = out.reshape(N, out_h, out_w, self.num_filters)
+        self.out = out  # Store output here
         return out
 
     def backward(self, d_out):
@@ -134,10 +125,13 @@ class ConvLayer:
 class ReLULayer:
     def __init__(self):
         self.x = None
+        self.out = None  # Store output
 
     def forward(self, x):
         self.x = x
-        return np.maximum(0, x)
+        out = np.maximum(0, x)
+        self.out = out  # Store output
+        return out
 
     def backward(self, d_out):
         return d_out * (self.x > 0)
@@ -151,6 +145,7 @@ class MaxPoolLayer:
         self.pool_size = pool_size
         self.stride = stride
         self.x = None
+        self.out = None  # Store output
 
     def forward(self, x):
         self.x = x
@@ -167,6 +162,8 @@ class MaxPoolLayer:
                 w_end = w_start + self.pool_size
                 patch = x[:, h_start:h_end, w_start:w_end, :]
                 out[:, i, j, :] = np.max(patch, axis=(1, 2))
+
+        self.out = out  # Store output
         return out
 
     def backward(self, d_out):
@@ -197,10 +194,13 @@ class MaxPoolLayer:
 class FlattenLayer:
     def __init__(self):
         self.x_shape = None
+        self.out = None  # Store output
 
     def forward(self, x):
         self.x_shape = x.shape
-        return x.reshape(x.shape[0], -1)
+        out = x.reshape(x.shape[0], -1)
+        self.out = out  # Store output
+        return out
 
     def backward(self, d_out):
         return d_out.reshape(self.x_shape)
@@ -217,10 +217,13 @@ class DenseLayer:
         self.x = None
         self.dW = None
         self.db = None
+        self.out = None  # Store output
 
     def forward(self, x):
         self.x = x
-        return x.dot(self.weights) + self.biases
+        out = x.dot(self.weights) + self.biases
+        self.out = out  # Store output
+        return out
 
     def backward(self, d_out):
         self.dW = self.x.T.dot(d_out)
@@ -235,7 +238,7 @@ class DenseLayer:
 
 class SoftmaxLayer:
     def __init__(self):
-        self.out = None
+        self.out = None  # Store output
 
     def forward(self, x):
         exp_x = np.exp(x - np.max(x, axis=1, keepdims=True))

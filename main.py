@@ -39,8 +39,11 @@ def main():
 
     root = tk.Tk()
 
-    def start_training():
-        trainer.start_training(epochs=1, batch_size=16, lr=0.01)
+    # def start_training():
+    #     trainer.start_training(epochs=1, batch_size=16, lr=0.01)
+
+    def start_training(epochs, batch_size, lr=0.01):
+        trainer.start_training(epochs=epochs, batch_size=batch_size, lr=lr)
 
     def pause_training():
         trainer.pause_training()
@@ -50,11 +53,11 @@ def main():
 
     app = GUIApp(root, update_queue, start_training, pause_training, stop_training)
 
-    # Run a small forward pass to populate self.out for each layer:
+    # Perform a forward pass to ensure self.out is set in each layer
     dummy_x = X_train[:1]
-    _ = cnn.forward(dummy_x)  # Now self.out is set in each layer.
+    _ = cnn.forward(dummy_x)  # Now self.out is populated with real data
 
-    # Now get real layer data based on actual model parameters/activations
+    # Retrieve real layer data now that out is set
     initial_data = trainer.get_layer_data()
     app.draw_initial_network(initial_data)
 
